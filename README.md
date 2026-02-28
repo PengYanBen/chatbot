@@ -76,7 +76,7 @@ pip install -r requirements.txt
 ### 2) 启动
 
 ```bash
-python server.py --host 0.0.0.0 --port 8765 --out ./recordings
+python server.py --host 0.0.0.0 --port 8765 --out ./recordings --mode record
 ```
 
 ### 3) 结果
@@ -128,9 +128,11 @@ python server.py --host 0.0.0.0 --port 8765 --out ./recordings
    - 检查局域网连通性、防火墙、端口
    - 确认 `SERVER_WS_URL` IP 不是 `127.0.0.1`
 
-2. **声音失真/空白**
-   - 修改 I2S 引脚映射
-   - 尝试不同 `ibuf` 和每次读取帧长
+2. **声音失真/空白/听不清**
+   - INMP441 建议按 `32-bit I2S` 采集，再转 `16-bit PCM` 上传（当前代码已内置）
+   - 调整 `PCM_SHIFT_BITS`（推荐在 `15~17` 之间微调）
+   - 调整增益 `PCM_GAIN_NUM/PCM_GAIN_DEN`（例如 1/1、2/1、3/2）避免过小或爆音
+   - 核查接线和供电（`SCK/WS/SD` 任意错位都会出现噪声或断续）
 
 3. **延迟大**
    - 减小 chunk 大小（如 20ms）
@@ -141,3 +143,52 @@ python server.py --host 0.0.0.0 --port 8765 --out ./recordings
    - 新版本已增加 Wi-Fi 在线检查和指数退避重连（2s -> 20s）
    - 确认服务端地址可达：ESP32 与服务端必须在同一网段，且 `SERVER_WS_URL` 使用服务端实际局域网 IP
    - 路由器/热点信号弱时会频繁中断，建议先近距离测试并固定信道
+
+### 音频清晰度调参建议（重点）
+
+如果你能录到声音但“非常小、发闷、刺耳或像噪声”，优先调这两个参数：
+
+- `PCM_SHIFT_BITS`：决定把 32-bit 原始样本右移多少位再变成 16-bit。
+- `PCM_GAIN_NUM/PCM_GAIN_DEN`：数字增益。
+
+建议顺序：
+
+1. 先固定 `PCM_GAIN_NUM=1, PCM_GAIN_DEN=1`，只调 `PCM_SHIFT_BITS`（15/16/17）
+2. 选出最不失真的 shift 后，再把增益调到合适响度（如 2/1）
+3. 每次只改一个参数，录 5~10 秒 A/B 对比
+
+
+
+---
+
+## 七、如何做到“像小爱一样可打断、可重新提问”
+
+你现在已经能把音频落到 `recordings/`。要做到“中间打断+重新提问”，核心是把录音改成**流式回合管理**：
+
+1. **VAD 分段**：连续音频中检测“用户开始说话/说完了”
+2. **ASR 实时识别**：每个回合转成文本
+3. **LLM 生成回复**
+4. **TTS 播放时监听打断**：如果检测到新一轮人声，立即停止当前播报（barge-in）
+
+当前 `server.py` 已内置一个 `assistant` 示例模式：
+
+```bash
+python server.py --host 0.0.0.0 --port 8765 --out ./recordings --mode assistant
+```
+
+在这个模式下：
+
+- 会持续保存全量原始音频 `raw_*.wav`
+- VAD 检测到一个说话回合后，另存 `turn_*.wav`
+- 回合结束后会触发示例 `fake_asr_and_llm()`（你要替换成真实 ASR/LLM）
+- 服务端会通过 WebSocket 下发：
+  - `{"type":"assistant_reply","text":"..."}`
+  - 若用户在播报期间再次开口，会下发 `{"type":"barge_in"...}`
+
+> 你只要在 ESP32 客户端补一个“下行消息处理 + TTS 播放控制”，收到 `barge_in` 就立刻停播，即可实现“小爱式打断”。
+
+### 推荐你下一步替换的模块
+
+- `fake_asr_and_llm()` -> Whisper/FunASR + 你的 LLM API
+- 客户端增加 `recv` 协程：处理 `assistant_reply` / `barge_in`
+- TTS 可先放服务端合成，返回 URL 或音频分片给客户端播放
