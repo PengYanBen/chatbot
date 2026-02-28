@@ -38,14 +38,12 @@ INMP441 常见引脚：`VDD / GND / SD / SCK(BCLK) / WS(LRCL) / L/R`
 ## 二、ESP32-S3 端（MicroPython v1.26）
 
 ### 1) 准备依赖
-
 `esp32_client/main.py` 使用了：
 
 - `network`, `machine`, `uasyncio`
-- `uwebsockets.client`（需要放到板子上，文件名常见为 `uwebsockets/client.py`）
+- `uwebsockets.client`（仓库已提供：`esp32_client/uwebsockets/client.py`，上传到设备后路径应为 `/uwebsockets/client.py`）
 
-你可以通过 mpremote / Thonny 上传代码和依赖。
-
+你可以通过 mpremote / Thonny 上传 `main.py` 和 `uwebsockets/` 目录。
 ### 2) 修改配置
 
 在 `esp32_client/main.py` 顶部修改：
