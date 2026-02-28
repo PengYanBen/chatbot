@@ -1,34 +1,34 @@
 import argparse
 import asyncio
 import json
+import time
 import wave
-from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import websockets
 
 
-@dataclass
-class AudioConfig:
-    sample_rate: int = 16000
-    bits: int = 16
-    channels: int = 1
+def default_audio_config():
+    return {
+        "sample_rate": 16000,
+        "bits": 16,
+        "channels": 1,
+    }
 
 
 def build_output_path(out_dir: Path, device: str) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts = time.strftime("%Y%m%d_%H%M%S", time.localtime())
     safe_device = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in device)
-    return out_dir / f"{safe_device}_{ts}.wav"
+    return out_dir / "{}_{}.wav".format(safe_device, ts)
 
 
-def open_wav(path: Path, cfg: AudioConfig):
+def open_wav(path: Path, cfg):
     wf = wave.open(str(path), "wb")
-    wf.setnchannels(cfg.channels)
-    wf.setsampwidth(cfg.bits // 8)
-    wf.setframerate(cfg.sample_rate)
+    wf.setnchannels(cfg["channels"])
+    wf.setsampwidth(cfg["bits"] // 8)
+    wf.setframerate(cfg["sample_rate"])
     return wf
 
 
@@ -37,12 +37,12 @@ async def handle_ws(websocket, out_dir: Path):
     query = parse_qs(parsed.query)
     device = query.get("device", ["unknown-device"])[0]
 
-    cfg = AudioConfig()
+    cfg = default_audio_config()
     wf = None
     total_bytes = 0
 
     try:
-        print(f"[connect] device={device} path={parsed.path}")
+        print("[connect] device={} path={}".format(device, parsed.path))
         if parsed.path != "/ws/audio":
             await websocket.close(code=1008, reason="unsupported path")
             return
@@ -57,40 +57,39 @@ async def handle_ws(websocket, out_dir: Path):
 
                 msg_type = payload.get("type")
                 if msg_type == "start":
-                    cfg = AudioConfig(
-                        sample_rate=int(payload.get("sample_rate", cfg.sample_rate)),
-                        bits=int(payload.get("bits", cfg.bits)),
-                        channels=int(payload.get("channels", cfg.channels)),
-                    )
+                    cfg = {
+                        "sample_rate": int(payload.get("sample_rate", cfg["sample_rate"])),
+                        "bits": int(payload.get("bits", cfg["bits"])),
+                        "channels": int(payload.get("channels", cfg["channels"])),
+                    }
                     out_path = build_output_path(out_dir, device)
                     wf = open_wav(out_path, cfg)
-                    print(f"[start] device={device} -> {out_path} cfg={cfg}")
+                    print("[start] device={} -> {} cfg={}".format(device, out_path, cfg))
                 elif msg_type == "stop":
-                    print(f"[stop] device={device} total_bytes={total_bytes}")
+                    print("[stop] device={} total_bytes={}".format(device, total_bytes))
                     break
                 else:
-                    print(f"[info] unknown text type={msg_type}")
+                    print("[info] unknown text type={}".format(msg_type))
             else:
                 if wf is None:
-                    # 如果客户端直接发二进制，按默认参数写入
                     out_path = build_output_path(out_dir, device)
                     wf = open_wav(out_path, cfg)
-                    print(f"[implicit-start] device={device} -> {out_path} cfg={cfg}")
+                    print("[implicit-start] device={} -> {} cfg={}".format(device, out_path, cfg))
 
                 wf.writeframes(message)
                 total_bytes += len(message)
 
     except websockets.ConnectionClosed as e:
-        print(f"[disconnect] device={device} code={e.code} reason={e.reason}")
+        print("[disconnect] device={} code={} reason={}".format(device, e.code, e.reason))
     finally:
         if wf is not None:
             wf.close()
-        print(f"[final] device={device} bytes={total_bytes}")
+        print("[final] device={} bytes={}".format(device, total_bytes))
 
 
 async def run_server(host: str, port: int, out_dir: Path):
     async with websockets.serve(lambda ws: handle_ws(ws, out_dir), host, port, max_size=None):
-        print(f"[server] listening on ws://{host}:{port}/ws/audio")
+        print("[server] listening on ws://{}:{}/ws/audio".format(host, port))
         await asyncio.Future()
 
 

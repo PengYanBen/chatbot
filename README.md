@@ -16,6 +16,8 @@
 - `server/server.py`：Python WebSocket 服务端（接收音频并落盘）
 - `server/requirements.txt`：服务端依赖
 
+服务端脚本使用 Python 标准库（`argparse/json/time/wave/pathlib` 等）+ `websockets`，不再依赖 `dataclasses` 与 `datetime`。
+
 ---
 
 ## 一、硬件连接（INMP441 -> ESP32-S3）
@@ -38,12 +40,14 @@ INMP441 常见引脚：`VDD / GND / SD / SCK(BCLK) / WS(LRCL) / L/R`
 ## 二、ESP32-S3 端（MicroPython v1.26）
 
 ### 1) 准备依赖
+
 `esp32_client/main.py` 使用了：
 
 - `network`, `machine`, `uasyncio`
 - `uwebsockets.client`（仓库已提供：`esp32_client/uwebsockets/client.py`，上传到设备后路径应为 `/uwebsockets/client.py`）
 
 你可以通过 mpremote / Thonny 上传 `main.py` 和 `uwebsockets/` 目录。
+
 ### 2) 修改配置
 
 在 `esp32_client/main.py` 顶部修改：
@@ -131,3 +135,9 @@ python server.py --host 0.0.0.0 --port 8765 --out ./recordings
 3. **延迟大**
    - 减小 chunk 大小（如 20ms）
    - 服务端异步处理，不要阻塞事件循环
+
+
+4. **反复出现 `ECONNABORTED`**
+   - 新版本已增加 Wi-Fi 在线检查和指数退避重连（2s -> 20s）
+   - 确认服务端地址可达：ESP32 与服务端必须在同一网段，且 `SERVER_WS_URL` 使用服务端实际局域网 IP
+   - 路由器/热点信号弱时会频繁中断，建议先近距离测试并固定信道

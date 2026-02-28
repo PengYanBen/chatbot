@@ -25,15 +25,29 @@ I2S_SD_PIN = 4
 CHUNK_BYTES = 640
 I2S_BUFFER_BYTES = CHUNK_BYTES * 20
 
-RECONNECT_SECONDS = 3
+RECONNECT_SECONDS_MIN = 2
+RECONNECT_SECONDS_MAX = 20
 
 
-def connect_wifi(ssid, password):
+def _fmt_exc(e):
+    args = getattr(e, "args", None)
+    if args:
+        return "{} args={}".format(type(e).__name__, args)
+    return "{}: {}".format(type(e).__name__, e)
+
+
+def connect_wifi(ssid, password, force_reconnect=False):
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
 
+    if force_reconnect and wlan.isconnected():
+        try:
+            wlan.disconnect()
+            utime.sleep_ms(300)
+        except Exception:
+            pass
+
     if wlan.isconnected():
-        print("[wifi] already connected:", wlan.ifconfig())
         return wlan
 
     print("[wifi] connecting...")
@@ -48,6 +62,14 @@ def connect_wifi(ssid, password):
 
     print("[wifi] connected:", wlan.ifconfig())
     return wlan
+
+
+def ensure_wifi(ssid, password):
+    wlan = network.WLAN(network.STA_IF)
+    wlan.active(True)
+    if wlan.isconnected():
+        return wlan
+    return connect_wifi(ssid, password, force_reconnect=True)
 
 
 def build_i2s():
@@ -68,6 +90,8 @@ async def stream_audio_once():
     audio_in = None
     ws = None
     try:
+        ensure_wifi(WIFI_SSID, WIFI_PASSWORD)
+
         print("[ws] connecting:", SERVER_WS_URL)
         ws = ws_client.connect(SERVER_WS_URL)
         print("[ws] connected")
@@ -87,6 +111,9 @@ async def stream_audio_once():
         mv = memoryview(buf)
 
         while True:
+            if not network.WLAN(network.STA_IF).isconnected():
+                raise OSError("wifi disconnected")
+
             n = audio_in.readinto(buf)
             if n is None or n <= 0:
                 await asyncio.sleep_ms(5)
@@ -97,7 +124,7 @@ async def stream_audio_once():
             await asyncio.sleep_ms(0)
 
     except Exception as e:
-        print("[stream] error:", e)
+        print("[stream] error:", _fmt_exc(e))
     finally:
         if ws is not None:
             try:
@@ -118,11 +145,13 @@ async def stream_audio_once():
 
 async def main():
     connect_wifi(WIFI_SSID, WIFI_PASSWORD)
+    retry_s = RECONNECT_SECONDS_MIN
 
     while True:
         await stream_audio_once()
-        print("[main] reconnect in {}s".format(RECONNECT_SECONDS))
-        await asyncio.sleep(RECONNECT_SECONDS)
+        print("[main] reconnect in {}s".format(retry_s))
+        await asyncio.sleep(retry_s)
+        retry_s = min(retry_s * 2, RECONNECT_SECONDS_MAX)
 
 
 if __name__ == "__main__":

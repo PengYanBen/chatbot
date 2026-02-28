@@ -121,6 +121,7 @@ def connect(url):
     host, port, path = _parse_url(url)
     addr = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)[0][-1]
     sock = socket.socket()
+    sock.settimeout(8)
     sock.connect(addr)
 
     nonce = ubinascii.b2a_base64(
@@ -161,11 +162,15 @@ def connect(url):
         + b"Sec-WebSocket-Version: 13\r\n\r\n"
     )
 
-    sock.write(req)
-    headers = _read_http_headers(sock)
+    try:
+        sock.write(req)
+        headers = _read_http_headers(sock)
 
-    if headers.get(b"upgrade") != b"websocket":
+        if headers.get(b"upgrade") != b"websocket":
+            raise OSError("invalid websocket upgrade response")
+
+        sock.settimeout(None)
+        return WebsocketClient(sock)
+    except Exception:
         sock.close()
-        raise OSError("invalid websocket upgrade response")
-
-    return WebsocketClient(sock)
+        raise
