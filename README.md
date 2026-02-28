@@ -130,7 +130,7 @@ python server.py --host 0.0.0.0 --port 8765 --out ./recordings --mode record
 
 2. **声音失真/空白/听不清**
    - INMP441 建议按 `32-bit I2S` 采集，再转 `16-bit PCM` 上传（当前代码已内置）
-   - 调整 `PCM_SHIFT_BITS`（推荐在 `15~17` 之间微调）
+   - 调整 `PCM_DOWN_SHIFT`（推荐在 `15~17` 之间微调）
    - 调整增益 `PCM_GAIN_NUM/PCM_GAIN_DEN`（例如 1/1、2/1、3/2）避免过小或爆音
    - 核查接线和供电（`SCK/WS/SD` 任意错位都会出现噪声或断续）
 
@@ -144,16 +144,16 @@ python server.py --host 0.0.0.0 --port 8765 --out ./recordings --mode record
    - 确认服务端地址可达：ESP32 与服务端必须在同一网段，且 `SERVER_WS_URL` 使用服务端实际局域网 IP
    - 路由器/热点信号弱时会频繁中断，建议先近距离测试并固定信道
 
-### 音频清晰度调参建议（重点）
+### 音频清晰度调参建议（重点，已针对“声音小+失真”升级）
 
 如果你能录到声音但“非常小、发闷、刺耳或像噪声”，优先调这两个参数：
 
-- `PCM_SHIFT_BITS`：决定把 32-bit 原始样本右移多少位再变成 16-bit。
+- `PCM_DOWN_SHIFT`：决定把 32-bit 原始样本右移多少位再变成 16-bit。
 - `PCM_GAIN_NUM/PCM_GAIN_DEN`：数字增益。
 
 建议顺序：
 
-1. 先固定 `PCM_GAIN_NUM=1, PCM_GAIN_DEN=1`，只调 `PCM_SHIFT_BITS`（15/16/17）
+1. 先固定 `PCM_GAIN_NUM=1, PCM_GAIN_DEN=1`，只调 `PCM_DOWN_SHIFT`（推荐 7/8/9）
 2. 选出最不失真的 shift 后，再把增益调到合适响度（如 2/1）
 3. 每次只改一个参数，录 5~10 秒 A/B 对比
 
@@ -192,3 +192,25 @@ python server.py --host 0.0.0.0 --port 8765 --out ./recordings --mode assistant
 - `fake_asr_and_llm()` -> Whisper/FunASR + 你的 LLM API
 - 客户端增加 `recv` 协程：处理 `assistant_reply` / `barge_in`
 - TTS 可先放服务端合成，返回 URL 或音频分片给客户端播放
+
+
+#### 一键排查顺序（按这个做，最快）
+
+1. 先把 `PCM_GAIN_NUM/PCM_GAIN_DEN` 设为 `1/1`，避免先天爆音。
+2. `PCM_EXTRACT_MODE` 先用 `le32_left24`，如果依然全是噪声改成 `be32_left24` 再试。
+3. 调 `PCM_DOWN_SHIFT`：
+   - 太小声：`8 -> 7`
+   - 失真爆音：`8 -> 9`
+4. 看串口日志里的 `[audio] peak16=...`：
+   - 长期 `< 2000`：太小声（可降 shift 或加 gain）
+   - 经常接近 `32767`：已削顶失真（升 shift 或降 gain）
+5. 仍有“闷/低频轰鸣”时，保持 `ENABLE_DC_BLOCK=True`。
+
+#### 推荐初始参数
+
+- `PCM_EXTRACT_MODE = "le32_left24"`
+- `PCM_DOWN_SHIFT = 8`
+- `PCM_GAIN_NUM/PCM_GAIN_DEN = 1/1`
+- `ENABLE_DC_BLOCK = True`
+
+> 这套参数比之前默认增益更保守，优先保证不失真，然后再逐步放大。

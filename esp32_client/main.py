@@ -14,16 +14,28 @@ SERVER_WS_URL = "ws://192.168.1.20:8765/ws/audio?device=esp32-s3-01"
 
 SAMPLE_RATE = 16000
 
-# INMP441 通常建议 I2S 以 32-bit 接收，再转为 16-bit 发送。
+# INMP441 常见输出是 24-bit 数据装在 32-bit slot 中。
 I2S_BITS = 32
 PCM_BITS = 16
 CHANNELS = I2S.MONO
 
-# 当麦克风原始数据是 24-bit left-justified in 32-bit 时，推荐右移 16。
-# 若声音很小或失真，可尝试 15 / 17。
-PCM_SHIFT_BITS = 16
-PCM_GAIN_NUM = 2
+# 关键参数：根据实测切换，解决“声音小/失真/噪声”
+# - le32_left24: 小端 32-bit，24-bit left-justified（ESP32 常见）
+# - be32_left24: 大端 32-bit，24-bit left-justified
+PCM_EXTRACT_MODE = "le32_left24"
+
+# 24bit -> 16bit 默认右移 8；
+# 若声音太小可改 7；若失真爆音可改 9。
+PCM_DOWN_SHIFT = 8
+
+# 数字增益，默认 1.0（先保守避免爆音）
+PCM_GAIN_NUM = 1
 PCM_GAIN_DEN = 1
+
+# 一阶 DC-block（高通）: y[n] = x[n] - x[n-1] + a*y[n-1]
+# 关掉可设 False
+ENABLE_DC_BLOCK = True
+DC_BLOCK_A_Q15 = 32440  # 约 0.99 * 32768
 
 # I2S 引脚（根据你的开发板改）
 I2S_SCK_PIN = 5
@@ -40,6 +52,10 @@ I2S_BUFFER_BYTES = RAW_CHUNK_BYTES * 20
 
 RECONNECT_SECONDS_MIN = 2
 RECONNECT_SECONDS_MAX = 20
+
+# DC-block 状态
+_prev_x = 0
+_prev_y = 0
 
 
 def _fmt_exc(e):
@@ -99,17 +115,44 @@ def build_i2s():
     )
 
 
+def _read_i32(raw_buf, b):
+    if PCM_EXTRACT_MODE == "le32_left24":
+        x = raw_buf[b] | (raw_buf[b + 1] << 8) | (raw_buf[b + 2] << 16) | (raw_buf[b + 3] << 24)
+    elif PCM_EXTRACT_MODE == "be32_left24":
+        x = raw_buf[b + 3] | (raw_buf[b + 2] << 8) | (raw_buf[b + 1] << 16) | (raw_buf[b] << 24)
+    else:
+        raise ValueError("unsupported PCM_EXTRACT_MODE")
+
+    if x & 0x80000000:
+        x -= 0x100000000
+    return x
+
+
+def _dc_block(x):
+    global _prev_x, _prev_y
+    y = x - _prev_x + ((DC_BLOCK_A_Q15 * _prev_y) >> 15)
+    _prev_x = x
+    _prev_y = y
+    return y
+
+
 def pcm32_to_pcm16le(raw_buf, n_raw, out_buf):
-    """将 I2S 读取到的 32-bit PCM 转成 16-bit little-endian。"""
+    """将 I2S 读取到的 32-bit 原始数据转成 16-bit little-endian PCM。"""
     samples = n_raw // 4
     out_i = 0
+    peak = 0
+
     for i in range(samples):
         b = i * 4
-        x = raw_buf[b] | (raw_buf[b + 1] << 8) | (raw_buf[b + 2] << 16) | (raw_buf[b + 3] << 24)
-        if x & 0x80000000:
-            x -= 0x100000000
+        x = _read_i32(raw_buf, b)
 
-        y = x >> PCM_SHIFT_BITS
+        # left-justified 24-bit -> 24-bit signed
+        x24 = x >> 8
+
+        if ENABLE_DC_BLOCK:
+            x24 = _dc_block(x24)
+
+        y = x24 >> PCM_DOWN_SHIFT
         y = (y * PCM_GAIN_NUM) // PCM_GAIN_DEN
 
         if y > 32767:
@@ -117,11 +160,15 @@ def pcm32_to_pcm16le(raw_buf, n_raw, out_buf):
         elif y < -32768:
             y = -32768
 
+        ay = y if y >= 0 else -y
+        if ay > peak:
+            peak = ay
+
         out_buf[out_i] = y & 0xFF
         out_buf[out_i + 1] = (y >> 8) & 0xFF
         out_i += 2
 
-    return out_i
+    return out_i, peak
 
 
 async def stream_audio_once():
@@ -142,8 +189,10 @@ async def stream_audio_once():
             "format": "pcm_s16le",
             "ts_ms": utime.ticks_ms(),
             "i2s_bits": I2S_BITS,
-            "pcm_shift": PCM_SHIFT_BITS,
+            "extract_mode": PCM_EXTRACT_MODE,
+            "down_shift": PCM_DOWN_SHIFT,
             "gain": [PCM_GAIN_NUM, PCM_GAIN_DEN],
+            "dc_block": ENABLE_DC_BLOCK,
         }
         ws.send(ujson.dumps(start_msg))
 
@@ -151,6 +200,8 @@ async def stream_audio_once():
         raw_buf = bytearray(RAW_CHUNK_BYTES)
         pcm_buf = bytearray(PCM_CHUNK_BYTES)
         pcm_mv = memoryview(pcm_buf)
+
+        meter_ts = utime.ticks_ms()
 
         while True:
             if not network.WLAN(network.STA_IF).isconnected():
@@ -161,9 +212,16 @@ async def stream_audio_once():
                 await asyncio.sleep_ms(5)
                 continue
 
-            out_n = pcm32_to_pcm16le(raw_buf, n, pcm_buf)
+            out_n, peak = pcm32_to_pcm16le(raw_buf, n, pcm_buf)
             if out_n > 0:
                 ws.send(pcm_mv[:out_n])
+
+            # 每2秒打印一次峰值，便于现场调参
+            if utime.ticks_diff(utime.ticks_ms(), meter_ts) > 2000:
+                print("[audio] peak16={} mode={} shift={} gain={}/{}".format(
+                    peak, PCM_EXTRACT_MODE, PCM_DOWN_SHIFT, PCM_GAIN_NUM, PCM_GAIN_DEN
+                ))
+                meter_ts = utime.ticks_ms()
 
             await asyncio.sleep_ms(0)
 
