@@ -179,7 +179,7 @@ python server.py --host 0.0.0.0 --port 8765 --out ./recordings --mode record
 当前 `server.py` 已内置一个 `assistant` 示例模式：
 
 ```bash
-python server.py --host 0.0.0.0 --port 8765 --out ./recordings --mode assistant --asr whisper --whisper-model base --whisper-language zh
+python server.py --host 0.0.0.0 --port 8765 --out ./recordings --mode assistant --asr whisper --whisper-model base --whisper-language zh --whisper-no-speech-threshold 0.6 --whisper-logprob-threshold -1.0
 ```
 
 在这个模式下：
@@ -256,7 +256,7 @@ python server.py --host 0.0.0.0 --port 8765 --out ./recordings --mode assistant 
 ### 启动命令
 
 ```bash
-python server.py --host 0.0.0.0 --port 8765 --out ./recordings --mode assistant --asr whisper --whisper-model base --whisper-language zh
+python server.py --host 0.0.0.0 --port 8765 --out ./recordings --mode assistant --asr whisper --whisper-model base --whisper-language zh --whisper-no-speech-threshold 0.6 --whisper-logprob-threshold -1.0
 ```
 
 ### 下行消息（给 ESP32 客户端）
@@ -267,3 +267,29 @@ python server.py --host 0.0.0.0 --port 8765 --out ./recordings --mode assistant 
 - `{"type":"barge_in","reason":"user_speaking"}`
 
 > 如果环境未安装 Whisper，服务端会自动降级并提示 `（识别失败或未安装 whisper）`。
+
+
+---
+
+## 九、识别率低 / 噪音被识别怎么办
+
+已在服务端加入两层抑噪策略：
+
+1. **回合级噪声过滤**：
+   - 过短回合、低语音占比回合、峰值过低回合会直接跳过 ASR（下发 `asr_skipped`）。
+2. **Whisper 解码约束**：
+   - 使用 `no_speech_threshold` 与 `logprob_threshold` 过滤无效文本。
+
+### 可调参数（服务端）
+
+- `--whisper-no-speech-threshold`（默认 `0.6`）
+  - 更大：更容易判定“无语音”，噪音误识别更少，但可能漏掉小声说话。
+- `--whisper-logprob-threshold`（默认 `-1.0`）
+  - 更高（如 `-0.8`）：结果更保守，垃圾文本更少。
+
+### 建议调参顺序
+
+1. 先保持客户端音频不过载（`clip` 低于 `5‰`）
+2. 服务端先把 `--whisper-no-speech-threshold` 调到 `0.7` 试一轮
+3. 仍有噪音文本，再把 `--whisper-logprob-threshold` 调到 `-0.8`
+4. 如果出现漏识别，再回调到 `0.6/-1.0`

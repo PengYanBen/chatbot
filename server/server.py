@@ -90,13 +90,44 @@ class TurnDetector:
                     self._speech_count = 0
                     event = "turn_end"
 
-        return event, rms
+        return event, rms, voiced
+
+
+class TurnStats:
+    def __init__(self):
+        self.total_frames = 0
+        self.voiced_frames = 0
+        self.max_rms = 0
+        self.rms_sum = 0
+
+    def add(self, rms, voiced):
+        self.total_frames += 1
+        self.rms_sum += rms
+        if voiced:
+            self.voiced_frames += 1
+        if rms > self.max_rms:
+            self.max_rms = rms
+
+    @property
+    def mean_rms(self):
+        if self.total_frames <= 0:
+            return 0
+        return self.rms_sum // self.total_frames
+
+    @property
+    def voiced_ratio(self):
+        if self.total_frames <= 0:
+            return 0.0
+        return self.voiced_frames / self.total_frames
 
 
 class WhisperASR:
-    def __init__(self, model_name="base", language="zh"):
+    def __init__(self, model_name="base", language="zh", no_speech_threshold=0.6, logprob_threshold=-1.0):
         self.model_name = model_name
         self.language = language
+        self.no_speech_threshold = no_speech_threshold
+        self.logprob_threshold = logprob_threshold
+
         self._model = None
         self.enabled = False
         self._load_error = None
@@ -104,7 +135,6 @@ class WhisperASR:
         try:
             import whisper  # type: ignore
 
-            self._whisper = whisper
             self._model = whisper.load_model(model_name)
             self.enabled = True
             print("[asr] whisper loaded model={}".format(model_name))
@@ -117,7 +147,18 @@ class WhisperASR:
         if not self.enabled:
             return ""
 
-        result = self._model.transcribe(str(wav_path), language=self.language, task="transcribe", fp16=False)
+        result = self._model.transcribe(
+            str(wav_path),
+            language=self.language,
+            task="transcribe",
+            fp16=False,
+            temperature=0.0,
+            condition_on_previous_text=False,
+            no_speech_threshold=self.no_speech_threshold,
+            logprob_threshold=self.logprob_threshold,
+            compression_ratio_threshold=2.4,
+            initial_prompt="这是中文家庭语音助手场景，尽量忽略环境噪音，仅输出清晰人声内容。",
+        )
         text = (result.get("text") or "").strip()
         return text
 
@@ -134,6 +175,23 @@ def local_llm_reply(user_text):
     if "你是谁" in user_text:
         return "我是你的 ESP32 语音助手，基于 Whisper 识别。"
     return "收到：{}".format(user_text)
+
+
+def should_drop_turn(stats: TurnStats, cfg, min_turn_ms=350, min_voiced_ratio=0.35, min_peak_rms=1200):
+    frame_ms = 20
+    turn_ms = stats.total_frames * frame_ms
+    too_short = turn_ms < min_turn_ms
+    too_unvoiced = stats.voiced_ratio < min_voiced_ratio
+    too_quiet = stats.max_rms < min_peak_rms
+    return too_short or too_unvoiced or too_quiet, {
+        "turn_ms": turn_ms,
+        "voiced_ratio": round(stats.voiced_ratio, 3),
+        "max_rms": stats.max_rms,
+        "mean_rms": stats.mean_rms,
+        "too_short": too_short,
+        "too_unvoiced": too_unvoiced,
+        "too_quiet": too_quiet,
+    }
 
 
 async def handle_ws_record(websocket, out_dir: Path):
@@ -201,6 +259,7 @@ async def handle_ws_assistant(websocket, out_dir: Path, asr: WhisperASR):
     turn_path = None
     in_turn = False
     tts_playing = False
+    turn_stats = TurnStats()
 
     try:
         if parsed.path != "/ws/audio":
@@ -239,10 +298,11 @@ async def handle_ws_assistant(websocket, out_dir: Path, asr: WhisperASR):
             if raw_wav is not None:
                 raw_wav.writeframes(frame)
 
-            event, rms = detector.feed(frame)
+            event, rms, voiced = detector.feed(frame)
 
             if event == "turn_start":
                 in_turn = True
+                turn_stats = TurnStats()
                 turn_path = build_output_path(out_dir, device, prefix="turn_")
                 turn_wav = open_wav(turn_path, cfg)
                 print("[turn-start] device={} rms={} path={}".format(device, rms, turn_path))
@@ -251,14 +311,22 @@ async def handle_ws_assistant(websocket, out_dir: Path, asr: WhisperASR):
                     await websocket.send(json.dumps({"type": "barge_in", "reason": "user_speaking"}))
                     tts_playing = False
 
-            if in_turn and turn_wav is not None:
-                turn_wav.writeframes(frame)
+            if in_turn:
+                turn_stats.add(rms, voiced)
+                if turn_wav is not None:
+                    turn_wav.writeframes(frame)
 
             if event == "turn_end" and in_turn:
                 in_turn = False
                 if turn_wav is not None:
                     turn_wav.close()
                     turn_wav = None
+
+                drop, info = should_drop_turn(turn_stats, cfg)
+                if drop:
+                    print("[turn-drop] device={} info={}".format(device, info))
+                    await websocket.send(json.dumps({"type": "asr_skipped", "reason": "noise", "meta": info}))
+                    continue
 
                 await websocket.send(json.dumps({"type": "asr_status", "status": "processing"}))
 
@@ -315,13 +383,20 @@ def parse_args():
     parser.add_argument("--asr", choices=["none", "whisper"], default="whisper")
     parser.add_argument("--whisper-model", default="base")
     parser.add_argument("--whisper-language", default="zh")
+    parser.add_argument("--whisper-no-speech-threshold", type=float, default=0.6)
+    parser.add_argument("--whisper-logprob-threshold", type=float, default=-1.0)
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
 
-    asr = WhisperASR(model_name=args.whisper_model, language=args.whisper_language)
+    asr = WhisperASR(
+        model_name=args.whisper_model,
+        language=args.whisper_language,
+        no_speech_threshold=args.whisper_no_speech_threshold,
+        logprob_threshold=args.whisper_logprob_threshold,
+    )
     if not (args.asr == "whisper" and args.mode == "assistant"):
         asr.enabled = False
 
