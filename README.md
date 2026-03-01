@@ -144,6 +144,12 @@ python server.py --host 0.0.0.0 --port 8765 --out ./recordings --mode record
    - 确认服务端地址可达：ESP32 与服务端必须在同一网段，且 `SERVER_WS_URL` 使用服务端实际局域网 IP
    - 路由器/热点信号弱时会频繁中断，建议先近距离测试并固定信道
 
+
+5. **服务端出现 `opening handshake failed` / `did not receive a valid HTTP request`**
+   - 这通常是客户端在 TCP 建连后立即断开、端口探测器扫描、或网络抖动导致，不一定是业务逻辑错误。
+   - 新版本服务端已降低 websockets 握手异常日志噪声，并对优雅退出做了处理。
+   - 若频繁出现：检查 ESP32 供电稳定性、Wi-Fi 信号、以及是否有其他程序在扫描该端口。
+
 ### 音频清晰度调参建议（重点，已针对“声音小+失真”升级）
 
 如果你能录到声音但“非常小、发闷、刺耳或像噪声”，优先调这两个参数：

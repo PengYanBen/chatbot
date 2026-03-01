@@ -1,12 +1,23 @@
 import argparse
 import asyncio
 import json
+import logging
 import time
 import wave
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import websockets
+
+
+def build_ws_logger():
+    logger = logging.getLogger("websockets.server")
+    logger.setLevel(logging.ERROR)
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("[ws] %(levelname)s: %(message)s"))
+        logger.addHandler(handler)
+    return logger
 
 
 def default_audio_config():
@@ -202,7 +213,11 @@ async def handle_ws_assistant(websocket, out_dir: Path, asr: WhisperASR):
 
         async for message in websocket:
             if isinstance(message, str):
-                payload = json.loads(message)
+                try:
+                    payload = json.loads(message)
+                except json.JSONDecodeError:
+                    print("[warn] invalid json text message in assistant mode")
+                    continue
                 msg_type = payload.get("type")
 
                 if msg_type == "start":
@@ -281,9 +296,14 @@ def build_handler(mode, out_dir, asr):
 
 async def run_server(host: str, port: int, out_dir: Path, mode: str, asr: WhisperASR):
     handler = build_handler(mode, out_dir, asr)
-    async with websockets.serve(handler, host, port, max_size=None):
+    ws_logger = build_ws_logger()
+
+    async with websockets.serve(handler, host, port, max_size=None, logger=ws_logger):
         print("[server] mode={} listening on ws://{}:{}/ws/audio".format(mode, host, port))
-        await asyncio.Future()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            print("[server] shutdown requested")
 
 
 def parse_args():
@@ -305,7 +325,10 @@ def main():
     if not (args.asr == "whisper" and args.mode == "assistant"):
         asr.enabled = False
 
-    asyncio.run(run_server(args.host, args.port, args.out, args.mode, asr))
+    try:
+        asyncio.run(run_server(args.host, args.port, args.out, args.mode, asr))
+    except KeyboardInterrupt:
+        print("[server] stopped by keyboard interrupt")
 
 
 if __name__ == "__main__":
