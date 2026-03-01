@@ -8,9 +8,9 @@ from machine import I2S, Pin
 import uwebsockets.client as ws_client
 
 # ========== 用户配置 ==========
-WIFI_SSID = "YOUR_WIFI_SSID"
-WIFI_PASSWORD = "YOUR_WIFI_PASSWORD"
-SERVER_WS_URL = "ws://192.168.1.20:8765/ws/audio?device=esp32-s3-01"
+WIFI_SSID = "63s3DCU_qVCj67532353@"
+WIFI_PASSWORD = "fg6jkqbhy59124@"
+SERVER_WS_URL = "ws://192.168.1.46:8000/ws/audio?device=esp32-s3-01"
 
 SAMPLE_RATE = 16000
 
@@ -28,12 +28,19 @@ PCM_EXTRACT_MODE = "le32_left24"
 # 若声音太小可改 7；若失真爆音可改 9。
 PCM_DOWN_SHIFT = 8
 
-# 数字增益，默认 1.0（先保守避免爆音）
+# 固定数字增益（当 AUTO_GAIN=False 生效）
 PCM_GAIN_NUM = 1
 PCM_GAIN_DEN = 1
 
+# 自动增益（推荐开启）：尽量把人声拉到可听，同时避免严重削顶
+AUTO_GAIN = True
+TARGET_PEAK = 12000      # 目标峰值
+AUTO_GAIN_MIN_Q8 = 64    # 0.25x
+AUTO_GAIN_MAX_Q8 = 1024  # 4.0x
+ATTACK_STEP_Q8 = 8       # 提高增益速度
+RELEASE_STEP_Q8 = 20     # 降低增益速度（更快防爆音）
+
 # 一阶 DC-block（高通）: y[n] = x[n] - x[n-1] + a*y[n-1]
-# 关掉可设 False
 ENABLE_DC_BLOCK = True
 DC_BLOCK_A_Q15 = 32440  # 约 0.99 * 32768
 
@@ -53,9 +60,10 @@ I2S_BUFFER_BYTES = RAW_CHUNK_BYTES * 20
 RECONNECT_SECONDS_MIN = 2
 RECONNECT_SECONDS_MAX = 20
 
-# DC-block 状态
+# DSP 状态
 _prev_x = 0
 _prev_y = 0
+_auto_gain_q8 = 256  # 1.0x
 
 
 def _fmt_exc(e):
@@ -136,11 +144,39 @@ def _dc_block(x):
     return y
 
 
+def _apply_gain(y):
+    if AUTO_GAIN:
+        return (y * _auto_gain_q8) >> 8
+    return (y * PCM_GAIN_NUM) // PCM_GAIN_DEN
+
+
+def _update_auto_gain(peak):
+    global _auto_gain_q8
+    if not AUTO_GAIN:
+        return
+
+    if peak <= 0:
+        return
+
+    desired_q8 = (TARGET_PEAK << 8) // peak
+
+    if desired_q8 > _auto_gain_q8:
+        _auto_gain_q8 = min(_auto_gain_q8 + ATTACK_STEP_Q8, desired_q8)
+    else:
+        _auto_gain_q8 = max(_auto_gain_q8 - RELEASE_STEP_Q8, desired_q8)
+
+    if _auto_gain_q8 < AUTO_GAIN_MIN_Q8:
+        _auto_gain_q8 = AUTO_GAIN_MIN_Q8
+    elif _auto_gain_q8 > AUTO_GAIN_MAX_Q8:
+        _auto_gain_q8 = AUTO_GAIN_MAX_Q8
+
+
 def pcm32_to_pcm16le(raw_buf, n_raw, out_buf):
     """将 I2S 读取到的 32-bit 原始数据转成 16-bit little-endian PCM。"""
     samples = n_raw // 4
     out_i = 0
     peak = 0
+    clip_count = 0
 
     for i in range(samples):
         b = i * 4
@@ -153,12 +189,14 @@ def pcm32_to_pcm16le(raw_buf, n_raw, out_buf):
             x24 = _dc_block(x24)
 
         y = x24 >> PCM_DOWN_SHIFT
-        y = (y * PCM_GAIN_NUM) // PCM_GAIN_DEN
+        y = _apply_gain(y)
 
         if y > 32767:
             y = 32767
+            clip_count += 1
         elif y < -32768:
             y = -32768
+            clip_count += 1
 
         ay = y if y >= 0 else -y
         if ay > peak:
@@ -168,7 +206,8 @@ def pcm32_to_pcm16le(raw_buf, n_raw, out_buf):
         out_buf[out_i + 1] = (y >> 8) & 0xFF
         out_i += 2
 
-    return out_i, peak
+    _update_auto_gain(peak)
+    return out_i, peak, clip_count, samples
 
 
 async def stream_audio_once():
@@ -192,6 +231,7 @@ async def stream_audio_once():
             "extract_mode": PCM_EXTRACT_MODE,
             "down_shift": PCM_DOWN_SHIFT,
             "gain": [PCM_GAIN_NUM, PCM_GAIN_DEN],
+            "auto_gain": AUTO_GAIN,
             "dc_block": ENABLE_DC_BLOCK,
         }
         ws.send(ujson.dumps(start_msg))
@@ -202,6 +242,9 @@ async def stream_audio_once():
         pcm_mv = memoryview(pcm_buf)
 
         meter_ts = utime.ticks_ms()
+        meter_peak = 0
+        meter_clip = 0
+        meter_samples = 0
 
         while True:
             if not network.WLAN(network.STA_IF).isconnected():
@@ -212,16 +255,30 @@ async def stream_audio_once():
                 await asyncio.sleep_ms(5)
                 continue
 
-            out_n, peak = pcm32_to_pcm16le(raw_buf, n, pcm_buf)
+            out_n, peak, clip_count, samples = pcm32_to_pcm16le(raw_buf, n, pcm_buf)
             if out_n > 0:
                 ws.send(pcm_mv[:out_n])
 
-            # 每2秒打印一次峰值，便于现场调参
+            if peak > meter_peak:
+                meter_peak = peak
+            meter_clip += clip_count
+            meter_samples += samples
+
+            # 每2秒打印一次峰值/削顶比例，便于现场调参
             if utime.ticks_diff(utime.ticks_ms(), meter_ts) > 2000:
-                print("[audio] peak16={} mode={} shift={} gain={}/{}".format(
-                    peak, PCM_EXTRACT_MODE, PCM_DOWN_SHIFT, PCM_GAIN_NUM, PCM_GAIN_DEN
+                clip_permille = (meter_clip * 1000 // meter_samples) if meter_samples > 0 else 0
+                print("[audio] peak16={} clip={}‰ mode={} shift={} agc={} agc_q8={}".format(
+                    meter_peak,
+                    clip_permille,
+                    PCM_EXTRACT_MODE,
+                    PCM_DOWN_SHIFT,
+                    AUTO_GAIN,
+                    _auto_gain_q8,
                 ))
                 meter_ts = utime.ticks_ms()
+                meter_peak = 0
+                meter_clip = 0
+                meter_samples = 0
 
             await asyncio.sleep_ms(0)
 

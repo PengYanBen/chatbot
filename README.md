@@ -201,9 +201,9 @@ python server.py --host 0.0.0.0 --port 8765 --out ./recordings --mode assistant
 3. 调 `PCM_DOWN_SHIFT`：
    - 太小声：`8 -> 7`
    - 失真爆音：`8 -> 9`
-4. 看串口日志里的 `[audio] peak16=...`：
+4. 看串口日志里的 `[audio] peak16=... clip=...‰`：
    - 长期 `< 2000`：太小声（可降 shift 或加 gain）
-   - 经常接近 `32767`：已削顶失真（升 shift 或降 gain）
+   - `clip` 长期很高或峰值经常接近 `32767`：已削顶失真（升 shift 或降 gain）
 5. 仍有“闷/低频轰鸣”时，保持 `ENABLE_DC_BLOCK=True`。
 
 #### 推荐初始参数
@@ -214,3 +214,22 @@ python server.py --host 0.0.0.0 --port 8765 --out ./recordings --mode assistant
 - `ENABLE_DC_BLOCK = True`
 
 > 这套参数比之前默认增益更保守，优先保证不失真，然后再逐步放大。
+
+
+#### 自动增益（推荐开启）
+
+新版客户端增加 `AUTO_GAIN`（自动增益）和削顶率统计。
+
+- 当人声太小时，自动缓慢增大增益。
+- 当出现爆音趋势时，自动快速减小增益。
+- 串口日志会输出：`clip=...‰`（千分比削顶率）。
+
+建议目标：
+
+- `peak16` 大致在 `6000~20000` 区间
+- `clip` 长期小于 `5‰`（越低越好）
+
+如果 `clip` 很高（比如 >30‰），请优先：
+
+1. `PCM_DOWN_SHIFT` 加 1（如 8->9）
+2. 或者关闭自动增益 `AUTO_GAIN=False`，再手动调 `PCM_GAIN_NUM/PCM_GAIN_DEN`
