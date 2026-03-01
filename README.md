@@ -179,7 +179,7 @@ python server.py --host 0.0.0.0 --port 8765 --out ./recordings --mode record
 当前 `server.py` 已内置一个 `assistant` 示例模式：
 
 ```bash
-python server.py --host 0.0.0.0 --port 8765 --out ./recordings --mode assistant --asr whisper --whisper-model base --whisper-language zh --whisper-no-speech-threshold 0.6 --whisper-logprob-threshold -1.0
+python server.py --host 0.0.0.0 --port 8765 --out ./recordings --mode assistant --asr faster-whisper --whisper-model small --whisper-language zh --faster-whisper-vad-filter true --faster-whisper-beam-size 1
 ```
 
 在这个模式下：
@@ -243,20 +243,20 @@ python server.py --host 0.0.0.0 --port 8765 --out ./recordings --mode assistant 
 
 ---
 
-## 八、Whisper 版“小爱同学”助手
+## 八、faster-whisper 版“小爱同学”助手
 
-服务端已接入 Whisper（可选），在 `assistant` 模式下流程是：
+服务端已接入 faster-whisper（可选），在 `assistant` 模式下流程是：
 
 1. VAD 检测用户一段话（`turn_start -> turn_end`）
 2. 将该回合音频保存为 `turn_*.wav`
-3. Whisper 识别文本（`asr_result`）
+3. faster-whisper 识别文本（`asr_result`）
 4. 生成助手回复（`assistant_reply`）
 5. 若播报中用户再次开口，发送 `barge_in`，用于客户端立刻停播并重新听写
 
 ### 启动命令
 
 ```bash
-python server.py --host 0.0.0.0 --port 8765 --out ./recordings --mode assistant --asr whisper --whisper-model base --whisper-language zh --whisper-no-speech-threshold 0.6 --whisper-logprob-threshold -1.0
+python server.py --host 0.0.0.0 --port 8765 --out ./recordings --mode assistant --asr faster-whisper --whisper-model small --whisper-language zh --faster-whisper-vad-filter true --faster-whisper-beam-size 1
 ```
 
 ### 下行消息（给 ESP32 客户端）
@@ -266,7 +266,7 @@ python server.py --host 0.0.0.0 --port 8765 --out ./recordings --mode assistant 
 - `{"type":"assistant_reply","text":"..."}`
 - `{"type":"barge_in","reason":"user_speaking"}`
 
-> 如果环境未安装 Whisper，服务端会自动降级并提示 `（识别失败或未安装 whisper）`。
+> 如果环境未安装 faster-whisper，服务端会自动降级并提示 `（识别失败或未安装 faster-whisper）`。
 
 
 ---
@@ -277,19 +277,19 @@ python server.py --host 0.0.0.0 --port 8765 --out ./recordings --mode assistant 
 
 1. **回合级噪声过滤**：
    - 过短回合、低语音占比回合、峰值过低回合会直接跳过 ASR（下发 `asr_skipped`）。
-2. **Whisper 解码约束**：
-   - 使用 `no_speech_threshold` 与 `logprob_threshold` 过滤无效文本。
+2. **faster-whisper 解码约束**：
+   - 使用内置 `vad_filter` 先裁剪静音段，再做转写。
 
 ### 可调参数（服务端）
 
-- `--whisper-no-speech-threshold`（默认 `0.6`）
-  - 更大：更容易判定“无语音”，噪音误识别更少，但可能漏掉小声说话。
-- `--whisper-logprob-threshold`（默认 `-1.0`）
-  - 更高（如 `-0.8`）：结果更保守，垃圾文本更少。
+- `--faster-whisper-vad-filter`（默认 `true`）
+  - 关闭后会把更多背景音送进识别，通常不建议。
+- `--faster-whisper-beam-size`（默认 `1`）
+  - 提高到 `3~5` 通常可提升准确率，但延迟会增加。
 
 ### 建议调参顺序
 
 1. 先保持客户端音频不过载（`clip` 低于 `5‰`）
-2. 服务端先把 `--whisper-no-speech-threshold` 调到 `0.7` 试一轮
-3. 仍有噪音文本，再把 `--whisper-logprob-threshold` 调到 `-0.8`
-4. 如果出现漏识别，再回调到 `0.6/-1.0`
+2. 保持 `--faster-whisper-vad-filter true`（先不要关）
+3. 若识别率低，把 `--faster-whisper-beam-size` 从 `1` 调到 `3`
+4. 若延迟过高，再回落到 `1~2`

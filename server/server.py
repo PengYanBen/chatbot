@@ -121,46 +121,48 @@ class TurnStats:
         return self.voiced_frames / self.total_frames
 
 
-class WhisperASR:
-    def __init__(self, model_name="base", language="zh", no_speech_threshold=0.6, logprob_threshold=-1.0):
+class FasterWhisperASR:
+    def __init__(self, model_name="small", language="zh", vad_filter=True, beam_size=1):
         self.model_name = model_name
         self.language = language
-        self.no_speech_threshold = no_speech_threshold
-        self.logprob_threshold = logprob_threshold
+        self.vad_filter = vad_filter
+        self.beam_size = beam_size
 
         self._model = None
         self.enabled = False
         self._load_error = None
 
         try:
-            import whisper  # type: ignore
+            from faster_whisper import WhisperModel  # type: ignore
 
-            self._model = whisper.load_model(model_name)
+            self._model = WhisperModel(model_name, device="auto", compute_type="int8")
             self.enabled = True
-            print("[asr] whisper loaded model={}".format(model_name))
+            print("[asr] faster-whisper loaded model={}".format(model_name))
         except Exception as e:
             self._load_error = str(e)
             self.enabled = False
-            print("[asr] whisper unavailable, fallback mode. error={}".format(self._load_error))
+            print("[asr] faster-whisper unavailable, fallback mode. error={}".format(self._load_error))
 
     def transcribe(self, wav_path: Path):
         if not self.enabled:
             return ""
 
-        result = self._model.transcribe(
+        segments, _info = self._model.transcribe(
             str(wav_path),
             language=self.language,
-            task="transcribe",
-            fp16=False,
-            temperature=0.0,
+            beam_size=self.beam_size,
+            vad_filter=self.vad_filter,
+            vad_parameters={"min_silence_duration_ms": 300},
             condition_on_previous_text=False,
-            no_speech_threshold=self.no_speech_threshold,
-            logprob_threshold=self.logprob_threshold,
-            compression_ratio_threshold=2.4,
+            temperature=0.0,
             initial_prompt="这是中文家庭语音助手场景，尽量忽略环境噪音，仅输出清晰人声内容。",
         )
-        text = (result.get("text") or "").strip()
-        return text
+        parts = []
+        for seg in segments:
+            t = (seg.text or "").strip()
+            if t:
+                parts.append(t)
+        return "".join(parts).strip()
 
 
 def local_llm_reply(user_text):
@@ -246,7 +248,7 @@ async def handle_ws_record(websocket, out_dir: Path):
         print("[final] device={} bytes={}".format(device, total_bytes))
 
 
-async def handle_ws_assistant(websocket, out_dir: Path, asr: WhisperASR):
+async def handle_ws_assistant(websocket, out_dir: Path, asr: FasterWhisperASR):
     parsed = urlparse(websocket.request.path)
     query = parse_qs(parsed.query)
     device = query.get("device", ["unknown-device"])[0]
@@ -336,7 +338,7 @@ async def handle_ws_assistant(websocket, out_dir: Path, asr: WhisperASR):
                     user_text = ""
 
                 if not user_text:
-                    user_text = "（识别失败或未安装 whisper）"
+                    user_text = "（识别失败或未安装 faster-whisper）"
 
                 assistant_text = local_llm_reply(user_text)
 
@@ -362,7 +364,7 @@ def build_handler(mode, out_dir, asr):
     return lambda ws: handle_ws_record(ws, out_dir)
 
 
-async def run_server(host: str, port: int, out_dir: Path, mode: str, asr: WhisperASR):
+async def run_server(host: str, port: int, out_dir: Path, mode: str, asr: FasterWhisperASR):
     handler = build_handler(mode, out_dir, asr)
     ws_logger = build_ws_logger()
 
@@ -380,24 +382,24 @@ def parse_args():
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--out", type=Path, default=Path("./recordings"))
     parser.add_argument("--mode", choices=["record", "assistant"], default="record")
-    parser.add_argument("--asr", choices=["none", "whisper"], default="whisper")
-    parser.add_argument("--whisper-model", default="base")
+    parser.add_argument("--asr", choices=["none", "faster-whisper"], default="faster-whisper")
+    parser.add_argument("--whisper-model", default="small")
     parser.add_argument("--whisper-language", default="zh")
-    parser.add_argument("--whisper-no-speech-threshold", type=float, default=0.6)
-    parser.add_argument("--whisper-logprob-threshold", type=float, default=-1.0)
+    parser.add_argument("--faster-whisper-vad-filter", choices=["true", "false"], default="true")
+    parser.add_argument("--faster-whisper-beam-size", type=int, default=1)
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
 
-    asr = WhisperASR(
+    asr = FasterWhisperASR(
         model_name=args.whisper_model,
         language=args.whisper_language,
-        no_speech_threshold=args.whisper_no_speech_threshold,
-        logprob_threshold=args.whisper_logprob_threshold,
+        vad_filter=(args.faster_whisper_vad_filter == "true"),
+        beam_size=args.faster_whisper_beam_size,
     )
-    if not (args.asr == "whisper" and args.mode == "assistant"):
+    if not (args.asr == "faster-whisper" and args.mode == "assistant"):
         asr.enabled = False
 
     try:
