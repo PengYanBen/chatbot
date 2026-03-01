@@ -311,3 +311,6 @@ python server.py ... --hf-token hf_xxx
 ```
 
 > `--whisper-model` 也支持本地模型目录路径；若使用本地目录可避免每次联网下载。
+
+如果日志出现类似 `Requested int8 compute type...`，新版本会自动回退尝试：`int8 -> int8_float16 -> float16 -> float32`，通常无需手动改代码。
+

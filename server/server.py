@@ -138,9 +138,20 @@ class FasterWhisperASR:
             self._apply_hf_token()
             from faster_whisper import WhisperModel  # type: ignore
 
-            self._model = WhisperModel(model_name, device="auto", compute_type="int8")
-            self.enabled = True
-            print("[asr] faster-whisper loaded model={}".format(model_name))
+            load_error = None
+            compute_candidates = ["int8", "int8_float16", "float16", "float32"]
+            for ctype in compute_candidates:
+                try:
+                    self._model = WhisperModel(model_name, device="auto", compute_type=ctype)
+                    self.enabled = True
+                    print("[asr] faster-whisper loaded model={} compute_type={}".format(model_name, ctype))
+                    break
+                except Exception as inner_e:
+                    load_error = inner_e
+
+            if not self.enabled:
+                raise RuntimeError(load_error)
+
         except Exception as e:
             self._load_error = str(e)
             self.enabled = False
