@@ -173,7 +173,7 @@ python server.py --host 0.0.0.0 --port 8765 --out ./recordings --mode record
 当前 `server.py` 已内置一个 `assistant` 示例模式：
 
 ```bash
-python server.py --host 0.0.0.0 --port 8765 --out ./recordings --mode assistant
+python server.py --host 0.0.0.0 --port 8765 --out ./recordings --mode assistant --asr whisper --whisper-model base --whisper-language zh
 ```
 
 在这个模式下：
@@ -233,3 +233,31 @@ python server.py --host 0.0.0.0 --port 8765 --out ./recordings --mode assistant
 
 1. `PCM_DOWN_SHIFT` 加 1（如 8->9）
 2. 或者关闭自动增益 `AUTO_GAIN=False`，再手动调 `PCM_GAIN_NUM/PCM_GAIN_DEN`
+
+
+---
+
+## 八、Whisper 版“小爱同学”助手
+
+服务端已接入 Whisper（可选），在 `assistant` 模式下流程是：
+
+1. VAD 检测用户一段话（`turn_start -> turn_end`）
+2. 将该回合音频保存为 `turn_*.wav`
+3. Whisper 识别文本（`asr_result`）
+4. 生成助手回复（`assistant_reply`）
+5. 若播报中用户再次开口，发送 `barge_in`，用于客户端立刻停播并重新听写
+
+### 启动命令
+
+```bash
+python server.py --host 0.0.0.0 --port 8765 --out ./recordings --mode assistant --asr whisper --whisper-model base --whisper-language zh
+```
+
+### 下行消息（给 ESP32 客户端）
+
+- `{"type":"asr_status","status":"processing"}`
+- `{"type":"asr_result","text":"..."}`
+- `{"type":"assistant_reply","text":"..."}`
+- `{"type":"barge_in","reason":"user_speaking"}`
+
+> 如果环境未安装 Whisper，服务端会自动降级并提示 `（识别失败或未安装 whisper）`。

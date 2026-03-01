@@ -34,7 +34,6 @@ def open_wav(path: Path, cfg):
 
 
 def frame_rms_s16le(frame):
-    # 输入为16-bit little-endian PCM
     samples = len(frame) // 2
     if samples <= 0:
         return 0
@@ -48,8 +47,7 @@ def frame_rms_s16le(frame):
 
 
 class TurnDetector:
-    def __init__(self, cfg, threshold=900, speech_frames=6, silence_frames=18):
-        self.cfg = cfg
+    def __init__(self, threshold=900, speech_frames=6, silence_frames=18):
         self.threshold = threshold
         self.speech_frames = speech_frames
         self.silence_frames = silence_frames
@@ -82,6 +80,49 @@ class TurnDetector:
                     event = "turn_end"
 
         return event, rms
+
+
+class WhisperASR:
+    def __init__(self, model_name="base", language="zh"):
+        self.model_name = model_name
+        self.language = language
+        self._model = None
+        self.enabled = False
+        self._load_error = None
+
+        try:
+            import whisper  # type: ignore
+
+            self._whisper = whisper
+            self._model = whisper.load_model(model_name)
+            self.enabled = True
+            print("[asr] whisper loaded model={}".format(model_name))
+        except Exception as e:
+            self._load_error = str(e)
+            self.enabled = False
+            print("[asr] whisper unavailable, fallback mode. error={}".format(self._load_error))
+
+    def transcribe(self, wav_path: Path):
+        if not self.enabled:
+            return ""
+
+        result = self._model.transcribe(str(wav_path), language=self.language, task="transcribe", fp16=False)
+        text = (result.get("text") or "").strip()
+        return text
+
+
+def local_llm_reply(user_text):
+    if not user_text:
+        return "我没听清楚，你可以再说一遍。"
+
+    text = user_text.lower()
+    if "几点" in user_text or "time" in text:
+        return "现在时间是 {}。".format(time.strftime("%H:%M", time.localtime()))
+    if "天气" in user_text:
+        return "我现在没有联网天气插件，但我可以先帮你记录问题。"
+    if "你是谁" in user_text:
+        return "我是你的 ESP32 语音助手，基于 Whisper 识别。"
+    return "收到：{}".format(user_text)
 
 
 async def handle_ws_record(websocket, out_dir: Path):
@@ -120,14 +161,11 @@ async def handle_ws_record(websocket, out_dir: Path):
                 elif msg_type == "stop":
                     print("[stop] device={} total_bytes={}".format(device, total_bytes))
                     break
-                else:
-                    print("[info] unknown text type={}".format(msg_type))
             else:
                 if wf is None:
                     out_path = build_output_path(out_dir, device)
                     wf = open_wav(out_path, cfg)
                     print("[implicit-start] device={} -> {} cfg={}".format(device, out_path, cfg))
-
                 wf.writeframes(message)
                 total_bytes += len(message)
 
@@ -139,24 +177,17 @@ async def handle_ws_record(websocket, out_dir: Path):
         print("[final] device={} bytes={}".format(device, total_bytes))
 
 
-async def fake_asr_and_llm(turn_path: Path):
-    # 这里是示例占位：你可以替换成 whisper/funasr + LLM 调用
-    await asyncio.sleep(0.15)
-    user_text = "（示例）识别到一段语音"
-    assistant_text = "（示例）好的，我在。你可以继续问。"
-    return user_text, assistant_text
-
-
-async def handle_ws_assistant(websocket, out_dir: Path):
+async def handle_ws_assistant(websocket, out_dir: Path, asr: WhisperASR):
     parsed = urlparse(websocket.request.path)
     query = parse_qs(parsed.query)
     device = query.get("device", ["unknown-device"])[0]
 
     cfg = default_audio_config()
-    detector = TurnDetector(cfg)
+    detector = TurnDetector()
 
     raw_wav = None
     turn_wav = None
+    turn_path = None
     in_turn = False
     tts_playing = False
 
@@ -172,19 +203,20 @@ async def handle_ws_assistant(websocket, out_dir: Path):
         async for message in websocket:
             if isinstance(message, str):
                 payload = json.loads(message)
-                if payload.get("type") == "start":
+                msg_type = payload.get("type")
+
+                if msg_type == "start":
                     cfg = {
                         "sample_rate": int(payload.get("sample_rate", cfg["sample_rate"])),
                         "bits": int(payload.get("bits", cfg["bits"])),
                         "channels": int(payload.get("channels", cfg["channels"])),
                     }
-                    detector = TurnDetector(cfg)
                     if raw_wav is not None:
                         raw_wav.close()
                     raw_path = build_output_path(out_dir, device, prefix="raw_")
                     raw_wav = open_wav(raw_path, cfg)
                     print("[assistant-start] cfg={}".format(cfg))
-                elif payload.get("type") == "stop":
+                elif msg_type == "stop":
                     break
                 continue
 
@@ -198,10 +230,9 @@ async def handle_ws_assistant(websocket, out_dir: Path):
                 in_turn = True
                 turn_path = build_output_path(out_dir, device, prefix="turn_")
                 turn_wav = open_wav(turn_path, cfg)
-                print("[turn-start] device={} rms={}".format(device, rms))
+                print("[turn-start] device={} rms={} path={}".format(device, rms, turn_path))
 
                 if tts_playing:
-                    # 小爱式打断关键：用户开口时，立即中断当前播报
                     await websocket.send(json.dumps({"type": "barge_in", "reason": "user_speaking"}))
                     tts_playing = False
 
@@ -214,11 +245,22 @@ async def handle_ws_assistant(websocket, out_dir: Path):
                     turn_wav.close()
                     turn_wav = None
 
-                user_text, assistant_text = await fake_asr_and_llm(turn_path)
-                print("[asr] {}".format(user_text))
-                print("[llm] {}".format(assistant_text))
+                await websocket.send(json.dumps({"type": "asr_status", "status": "processing"}))
 
-                # 这里给客户端发控制信号。客户端若实现下行播放，即可做到可打断对话。
+                if asr.enabled and turn_path is not None:
+                    user_text = await asyncio.to_thread(asr.transcribe, turn_path)
+                else:
+                    user_text = ""
+
+                if not user_text:
+                    user_text = "（识别失败或未安装 whisper）"
+
+                assistant_text = local_llm_reply(user_text)
+
+                print("[asr] {}".format(user_text))
+                print("[assistant] {}".format(assistant_text))
+
+                await websocket.send(json.dumps({"type": "asr_result", "text": user_text}))
                 await websocket.send(json.dumps({"type": "assistant_reply", "text": assistant_text}))
                 tts_playing = True
 
@@ -231,14 +273,14 @@ async def handle_ws_assistant(websocket, out_dir: Path):
             raw_wav.close()
 
 
-def build_handler(mode, out_dir):
+def build_handler(mode, out_dir, asr):
     if mode == "assistant":
-        return lambda ws: handle_ws_assistant(ws, out_dir)
+        return lambda ws: handle_ws_assistant(ws, out_dir, asr)
     return lambda ws: handle_ws_record(ws, out_dir)
 
 
-async def run_server(host: str, port: int, out_dir: Path, mode: str):
-    handler = build_handler(mode, out_dir)
+async def run_server(host: str, port: int, out_dir: Path, mode: str, asr: WhisperASR):
+    handler = build_handler(mode, out_dir, asr)
     async with websockets.serve(handler, host, port, max_size=None):
         print("[server] mode={} listening on ws://{}:{}/ws/audio".format(mode, host, port))
         await asyncio.Future()
@@ -250,12 +292,20 @@ def parse_args():
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--out", type=Path, default=Path("./recordings"))
     parser.add_argument("--mode", choices=["record", "assistant"], default="record")
+    parser.add_argument("--asr", choices=["none", "whisper"], default="whisper")
+    parser.add_argument("--whisper-model", default="base")
+    parser.add_argument("--whisper-language", default="zh")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
-    asyncio.run(run_server(args.host, args.port, args.out, args.mode))
+
+    asr = WhisperASR(model_name=args.whisper_model, language=args.whisper_language)
+    if not (args.asr == "whisper" and args.mode == "assistant"):
+        asr.enabled = False
+
+    asyncio.run(run_server(args.host, args.port, args.out, args.mode, asr))
 
 
 if __name__ == "__main__":

@@ -8,9 +8,9 @@ from machine import I2S, Pin
 import uwebsockets.client as ws_client
 
 # ========== 用户配置 ==========
-WIFI_SSID = "63s3DCU_qVCj67532353@"
-WIFI_PASSWORD = "fg6jkqbhy59124@"
-SERVER_WS_URL = "ws://192.168.1.46:8000/ws/audio?device=esp32-s3-01"
+WIFI_SSID = "YOUR_WIFI_SSID"
+WIFI_PASSWORD = "YOUR_WIFI_PASSWORD"
+SERVER_WS_URL = "ws://192.168.1.20:8765/ws/audio?device=esp32-s3-01"
 
 SAMPLE_RATE = 16000
 
