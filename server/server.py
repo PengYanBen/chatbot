@@ -123,12 +123,27 @@ class TurnStats:
 
 
 class FasterWhisperASR:
-    def __init__(self, model_name="small", language="zh", vad_filter=True, beam_size=1, hf_token=None):
+    def __init__(
+        self,
+        model_name="tiny",
+        language="zh",
+        vad_filter=True,
+        beam_size=1,
+        hf_token=None,
+        device="cpu",
+        cpu_threads=4,
+        num_workers=1,
+        compute_type="int8",
+    ):
         self.model_name = model_name
         self.language = language
         self.vad_filter = vad_filter
         self.beam_size = beam_size
         self.hf_token = hf_token
+        self.device = device
+        self.cpu_threads = cpu_threads
+        self.num_workers = num_workers
+        self.compute_type = compute_type
 
         self._model = None
         self.enabled = False
@@ -139,12 +154,28 @@ class FasterWhisperASR:
             from faster_whisper import WhisperModel  # type: ignore
 
             load_error = None
-            compute_candidates = ["int8", "int8_float16", "float16", "float32"]
+            if self.compute_type == "auto":
+                compute_candidates = ["int8", "int8_float32", "float32"]
+            else:
+                compute_candidates = [self.compute_type, "int8", "int8_float32", "float32"]
+
+            used_type = None
             for ctype in compute_candidates:
                 try:
-                    self._model = WhisperModel(model_name, device="auto", compute_type=ctype)
+                    self._model = WhisperModel(
+                        model_name,
+                        device=self.device,
+                        compute_type=ctype,
+                        cpu_threads=self.cpu_threads,
+                        num_workers=self.num_workers,
+                    )
                     self.enabled = True
-                    print("[asr] faster-whisper loaded model={} compute_type={}".format(model_name, ctype))
+                    used_type = ctype
+                    print(
+                        "[asr] faster-whisper loaded model={} device={} compute_type={} cpu_threads={} workers={}".format(
+                            model_name, self.device, ctype, self.cpu_threads, self.num_workers
+                        )
+                    )
                     break
                 except Exception as inner_e:
                     load_error = inner_e
@@ -175,8 +206,11 @@ class FasterWhisperASR:
             str(wav_path),
             language=self.language,
             beam_size=self.beam_size,
+            best_of=1,
+            patience=1.0,
+            word_timestamps=False,
             vad_filter=self.vad_filter,
-            vad_parameters={"min_silence_duration_ms": 300},
+            vad_parameters={"min_silence_duration_ms": 250, "speech_pad_ms": 120},
             condition_on_previous_text=False,
             temperature=0.0,
             initial_prompt="这是中文家庭语音助手场景，尽量忽略环境噪音，仅输出清晰人声内容。",
@@ -407,8 +441,12 @@ def parse_args():
     parser.add_argument("--out", type=Path, default=Path("./recordings"))
     parser.add_argument("--mode", choices=["record", "assistant"], default="record")
     parser.add_argument("--asr", choices=["none", "faster-whisper"], default="faster-whisper")
-    parser.add_argument("--whisper-model", default="small")
+    parser.add_argument("--whisper-model", default="tiny")
     parser.add_argument("--whisper-language", default="zh")
+    parser.add_argument("--asr-device", choices=["cpu", "auto"], default="cpu")
+    parser.add_argument("--asr-cpu-threads", type=int, default=4)
+    parser.add_argument("--asr-workers", type=int, default=1)
+    parser.add_argument("--asr-compute-type", default="int8", choices=["int8", "int8_float32", "float32", "auto"])
     parser.add_argument("--faster-whisper-vad-filter", choices=["true", "false"], default="true")
     parser.add_argument("--faster-whisper-beam-size", type=int, default=1)
     parser.add_argument("--hf-token", default=None, help="Hugging Face token for authenticated model download")
@@ -424,6 +462,10 @@ def main():
         vad_filter=(args.faster_whisper_vad_filter == "true"),
         beam_size=args.faster_whisper_beam_size,
         hf_token=args.hf_token,
+        device=args.asr_device,
+        cpu_threads=args.asr_cpu_threads,
+        num_workers=args.asr_workers,
+        compute_type=args.asr_compute_type,
     )
     if not (args.asr == "faster-whisper" and args.mode == "assistant"):
         asr.enabled = False

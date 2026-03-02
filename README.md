@@ -179,7 +179,7 @@ python server.py --host 0.0.0.0 --port 8765 --out ./recordings --mode record
 当前 `server.py` 已内置一个 `assistant` 示例模式：
 
 ```bash
-python server.py --host 0.0.0.0 --port 8765 --out ./recordings --mode assistant --asr faster-whisper --whisper-model small --whisper-language zh --faster-whisper-vad-filter true --faster-whisper-beam-size 1
+python server.py --host 0.0.0.0 --port 8765 --out ./recordings --mode assistant --asr faster-whisper --whisper-model tiny --whisper-language zh --asr-device cpu --asr-cpu-threads 4 --asr-workers 1 --asr-compute-type int8 --faster-whisper-vad-filter true --faster-whisper-beam-size 1
 ```
 
 在这个模式下：
@@ -256,7 +256,7 @@ python server.py --host 0.0.0.0 --port 8765 --out ./recordings --mode assistant 
 ### 启动命令
 
 ```bash
-python server.py --host 0.0.0.0 --port 8765 --out ./recordings --mode assistant --asr faster-whisper --whisper-model small --whisper-language zh --faster-whisper-vad-filter true --faster-whisper-beam-size 1
+python server.py --host 0.0.0.0 --port 8765 --out ./recordings --mode assistant --asr faster-whisper --whisper-model tiny --whisper-language zh --asr-device cpu --asr-cpu-threads 4 --asr-workers 1 --asr-compute-type int8 --faster-whisper-vad-filter true --faster-whisper-beam-size 1
 ```
 
 ### 下行消息（给 ESP32 客户端）
@@ -301,7 +301,7 @@ python server.py --host 0.0.0.0 --port 8765 --out ./recordings --mode assistant 
 
 ```bash
 export HF_TOKEN=hf_xxx
-python server.py --host 0.0.0.0 --port 8765 --out ./recordings --mode assistant --asr faster-whisper --whisper-model small --whisper-language zh --faster-whisper-vad-filter true --faster-whisper-beam-size 1
+python server.py --host 0.0.0.0 --port 8765 --out ./recordings --mode assistant --asr faster-whisper --whisper-model tiny --whisper-language zh --asr-device cpu --asr-cpu-threads 4 --asr-workers 1 --asr-compute-type int8 --faster-whisper-vad-filter true --faster-whisper-beam-size 1
 ```
 
 也可以通过参数直接传入：
@@ -314,3 +314,28 @@ python server.py ... --hf-token hf_xxx
 
 如果日志出现类似 `Requested int8 compute type...`，新版本会自动回退尝试：`int8 -> int8_float16 -> float16 -> float32`，通常无需手动改代码。
 
+
+
+---
+
+## 十、树莓派4B上 faster-whisper 性能优化建议
+
+在树莓派 4B（4G/8G）上，建议优先保证实时性：
+
+- 模型优先用 `tiny`（中文可先试 `small`，但延迟会明显增加）
+- `beam_size=1`（先低延迟，准确率不够再升到 2/3）
+- `device=cpu`，`compute_type=int8`
+- `cpu_threads=4`，`workers=1`（避免多 worker 抢占导致抖动）
+
+推荐启动命令：
+
+```bash
+python server.py --host 0.0.0.0 --port 8765 --out ./recordings --mode assistant --asr faster-whisper --whisper-model tiny --whisper-language zh --asr-device cpu --asr-cpu-threads 4 --asr-workers 1 --asr-compute-type int8 --faster-whisper-vad-filter true --faster-whisper-beam-size 1
+```
+
+如果你发现 CPU 占用过高或延迟抖动：
+
+1. 保持 `--whisper-model tiny`
+2. 保持 `--faster-whisper-beam-size 1`
+3. 把 `--asr-cpu-threads` 在 `3~4` 之间测试
+4. 若 `int8` 不可用，程序会自动回退到 `int8_float32/float32`
